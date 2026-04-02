@@ -41,3 +41,9 @@ Unfortunately, I have no longer access to a Hantek 1008 device,
 so I cannot test contributions.
 Also giving support in case of a problem is difficult under these
 circumstances, but I will try my best.
+
+
+### wip interface
+```bash
+python -u src/csvexport.py '-' -t first_column -s 1 2 3 4 5 6 7 8 | uv run src/oscilloscope.py
+```
