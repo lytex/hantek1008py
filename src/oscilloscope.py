@@ -16,6 +16,12 @@ Reference:
 
 Usage:
     sensor_producer | python oscilloscope.py
+
+If the producer buffers its stdout (common when piped), force
+line-buffering on the producer side for lowest latency:
+
+    stdbuf -oL sensor_producer | python oscilloscope.py
+    python -u sensor_producer.py | python oscilloscope.py
 """
 
 import sys
@@ -30,9 +36,9 @@ from matplotlib.figure import Figure
 
 # ── Configuration ────────────────────────────────────────────────────────
 
-SAMPLE_RATE = 440                          # Hz (from header)
-WINDOW_SEC = 3                             # seconds of visible history
-WINDOW_N = SAMPLE_RATE * WINDOW_SEC        # samples in rolling buffer
+SAMPLE_RATE = 40_000                          # Hz (from header)
+WINDOW_SEC = 1/1000                             # seconds of visible history
+WINDOW_N = int(SAMPLE_RATE * WINDOW_SEC)        # samples in rolling buffer
 DRAW_INTERVAL_MS = 20                      # ~50 fps drawing
 DATA_INTERVAL_MS = 1                       # drain stdin ASAP
 NCHAN = 8
@@ -59,16 +65,28 @@ class ReaderThread(threading.Thread):
 
     def run(self):
         try:
-            for raw in sys.stdin.buffer:
-                line = raw.rstrip(b"\n\r")
-                if not line or line[0:1] in (b"#", b"^", b"I"):
-                    continue
-                try:
-                    row = np.fromstring(line.decode(), sep=",", dtype=np.float64)
-                    if row.size == NCHAN + 1:
-                        self.pending.append(row)
-                except (ValueError, UnicodeDecodeError):
-                    continue
+            buf = b""
+            while True:
+                # read1() returns as soon as the OS has ANY data available,
+                # unlike the file iterator which fills a large read-ahead
+                # buffer first — this is the key to low-latency piped stdin.
+                chunk = sys.stdin.buffer.read1(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                *lines, buf = buf.split(b"\n")
+                for raw in lines:
+                    line = raw.rstrip(b"\r")
+                    if not line or line[0:1] in (b"#", b"^", b"I"):
+                        continue
+                    try:
+                        row = np.fromstring(
+                            line.decode(), sep=",", dtype=np.float64,
+                        )
+                        if row.size == NCHAN + 1:
+                            self.pending.append(row)
+                    except (ValueError, UnicodeDecodeError):
+                        continue
         except (OSError, ValueError):
             pass
         finally:
