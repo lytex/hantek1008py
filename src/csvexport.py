@@ -306,7 +306,7 @@ def sample(device: Hantek1008,
                 per_channel_data_list = [[int(round(value*1000)) for value in single_channel]
                                          for single_channel in per_channel_data_list]
 
-            if timestamp_style == "first_column":
+            if timestamp_style == TimestampStyle.FIRST_COLUMN:
                 assert time_of_first_value is not None
                 values_per_channel_count = len(per_channel_data_list[0])
                 deltatime_per_value = (time_of_last_value - time_of_first_value) / values_per_channel_count
