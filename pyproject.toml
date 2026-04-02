@@ -3,6 +3,8 @@ name = "hantek1008py"
 dependencies = ["pyusb",
     "overrides",
     "numpy",
+    "pyqt5",
+    "matplotlib",
 ]
 requires-python = ">=3.6"
 dynamic = ["version"]
