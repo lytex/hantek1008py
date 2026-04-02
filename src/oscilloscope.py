@@ -2,11 +2,20 @@
 """
 Real-time 8-channel oscilloscope — reads sensor CSV from stdin.
 
+Uses the officially recommended matplotlib-in-Qt pattern:
+  canvas.new_timer()  for timing (backend-native, properly integrated)
+  line.set_ydata()    for updating data
+  canvas.draw_idle()  for rendering
+
+Two timers decouple data ingestion from rendering:
+  data_timer   (1 ms)  — drains stdin as fast as possible
+  draw_timer   (20 ms) — redraws at ~50 fps
+
+Reference:
+  https://matplotlib.org/stable/gallery/user_interfaces/embedding_in_qt_sgskip.html
+
 Usage:
     sensor_producer | python oscilloscope.py
-
-The upstream producer may be stopped with Ctrl+C at any time;
-the display will keep showing the last received data.
 """
 
 import sys
@@ -14,9 +23,8 @@ import threading
 import numpy as np
 from collections import deque
 
-from PyQt5.QtWidgets import QApplication, QMainWindow, QStatusBar
-from PyQt5.QtCore import QTimer
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.backends.qt_compat import QtWidgets
+from matplotlib.backends.backend_qtagg import FigureCanvas
 from matplotlib.figure import Figure
 
 
@@ -25,7 +33,8 @@ from matplotlib.figure import Figure
 SAMPLE_RATE = 440                          # Hz (from header)
 WINDOW_SEC = 3                             # seconds of visible history
 WINDOW_N = SAMPLE_RATE * WINDOW_SEC        # samples in rolling buffer
-FPS = 300                                   # display refresh rate
+DRAW_INTERVAL_MS = 20                      # ~50 fps drawing
+DATA_INTERVAL_MS = 1                       # drain stdin ASAP
 NCHAN = 8
 
 COLORS = [
@@ -46,7 +55,7 @@ class ReaderThread(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
         self.pending: deque[np.ndarray] = deque(maxlen=200_000)
-        self.alive = True                  # flag visible to the GUI
+        self.alive = True
 
     def run(self):
         try:
@@ -78,28 +87,32 @@ class ReaderThread(threading.Thread):
         return np.vstack(rows)
 
 
-# ── Oscilloscope widget ─────────────────────────────────────────────────
+# ── Oscilloscope window ─────────────────────────────────────────────────
 
-class Oscilloscope(QMainWindow):
+class Oscilloscope(QtWidgets.QMainWindow):
     def __init__(self, reader: ReaderThread):
         super().__init__()
         self.reader = reader
         self.setWindowTitle("Oscilloscope — 8 ch @ 440 Hz")
         self.resize(1400, 900)
 
-        # ── rolling data buffer (pre-allocated) ─────────────────────────
-        # columns: [timestamp, ch1 … ch8]
+        # ── rolling data buffer ──────────────────────────────────────────
         self.buf = np.zeros((WINDOW_N, NCHAN + 1), dtype=np.float64)
-        self.n_total = 0                   # total samples received
+        self.n_total = 0
 
-        # ── matplotlib figure ────────────────────────────────────────────
-        self.fig = Figure(facecolor="#101020")
+        # ── Qt layout following the official example ─────────────────────
+        self._main = QtWidgets.QWidget()
+        self.setCentralWidget(self._main)
+        layout = QtWidgets.QVBoxLayout(self._main)
+
+        # ── matplotlib figure + canvas ───────────────────────────────────
+        self.canvas = FigureCanvas(Figure(figsize=(14, 9), facecolor="#101020"))
+        layout.addWidget(self.canvas)
+        self.fig = self.canvas.figure
         self.fig.subplots_adjust(
-            left=0.07, right=0.98, top=0.97, bottom=0.04,
+            left=0.07, right=0.98, top=0.97, bottom=0.05,
             hspace=0.12,
         )
-        self.canvas = FigureCanvasQTAgg(self.fig)
-        self.setCentralWidget(self.canvas)
 
         x = np.linspace(-WINDOW_SEC, 0, WINDOW_N)
         self.axes: list = []
@@ -128,113 +141,82 @@ class Oscilloscope(QMainWindow):
 
         self.axes[-1].set_xlabel("Time (s)", color="#666666", fontsize=9)
 
-        # ── initial draw + blit backgrounds ──────────────────────────────
-        self.canvas.draw()
-        self._save_backgrounds()
+        # ── status label ─────────────────────────────────────────────────
+        self.status = QtWidgets.QLabel()
+        self.status.setStyleSheet("color: #888888; background: #101020; padding: 4px;")
+        layout.addWidget(self.status)
 
-        # ── status bar ───────────────────────────────────────────────────
-        self.status = QStatusBar()
-        self.status.setStyleSheet("color: #888888; background: #101020;")
-        self.setStatusBar(self.status)
+        # ── backend-native timers (the key to reliable embedded Qt) ──────
+        # Data timer: drain stdin into rolling buffer as fast as possible
+        self._data_timer = self.canvas.new_timer(DATA_INTERVAL_MS)
+        self._data_timer.add_callback(self._update_data)
+        self._data_timer.start()
 
-        # ── refresh timer ────────────────────────────────────────────────
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._on_timer)
-        self._timer.start(1000 // FPS)
+        # Draw timer: push buffer into lines and repaint at ~50 fps
+        self._draw_timer = self.canvas.new_timer(DRAW_INTERVAL_MS)
+        self._draw_timer.add_callback(self._update_canvas)
+        self._draw_timer.start()
 
-    # ── helpers ──────────────────────────────────────────────────────────
+    # ── timer callbacks ──────────────────────────────────────────────────
 
-    def _save_backgrounds(self):
-        """Capture axes backgrounds for blitting."""
-        self._bgs = [
-            self.canvas.copy_from_bbox(ax.bbox) for ax in self.axes
-        ]
-
-    def _append(self, new_data: np.ndarray):
-        """Shift rolling buffer left and append new rows."""
-        n = len(new_data)
-        self.n_total += n
-        if n >= WINDOW_N:
-            self.buf[:] = new_data[-WINDOW_N:]
-        else:
-            self.buf[:-n] = self.buf[n:]
-            self.buf[-n:] = new_data
-
-    # ── periodic update (called at FPS) ──────────────────────────────────
-
-    def _on_timer(self):
+    def _update_data(self):
+        """Drain all available stdin data into the rolling buffer."""
         new = self.reader.drain()
-        if new is None:
-            self._update_status()
-            return
+        if new is not None:
+            n = len(new)
+            self.n_total += n
+            if n >= WINDOW_N:
+                self.buf[:] = new[-WINDOW_N:]
+            else:
+                self.buf[:-n] = self.buf[n:]
+                self.buf[-n:] = new
 
-        self._append(new)
-
-        # Update line data
-        for i in range(NCHAN):
-            self.lines[i].set_ydata(self.buf[:, i + 1])
-
-        # Auto-scale: only widen limits when data exceeds them.
-        # This avoids triggering a full redraw every single frame.
-        need_full_redraw = False
+    def _update_canvas(self):
+        """Push buffer into line artists, auto-scale, and redraw."""
         for i in range(NCHAN):
             y = self.buf[:, i + 1]
+            self.lines[i].set_ydata(y)
+
+            # Auto-scale: only widen y-limits when data exceeds them
+            lo, hi = self.axes[i].get_ylim()
             ymin, ymax = y.min(), y.max()
-            old_lo, old_hi = self.axes[i].get_ylim()
-            if ymin < old_lo or ymax > old_hi:
+            if ymin < lo or ymax > hi:
                 span = max(ymax - ymin, 1e-3)
                 margin = span * 0.35
                 self.axes[i].set_ylim(ymin - margin, ymax + margin)
-                need_full_redraw = True
 
-        if need_full_redraw:
-            # Axes ticks/labels changed — synchronous full redraw,
-            # then immediately re-capture backgrounds for future blits.
-            self.canvas.draw()
-            self._save_backgrounds()
-        else:
-            # Fast path: blit only the line artists (no tick redraw)
-            for i in range(NCHAN):
-                self.canvas.restore_region(self._bgs[i])
-                self.axes[i].draw_artist(self.lines[i])
-                self.canvas.blit(self.axes[i].bbox)
-
+        self.canvas.draw_idle()
         self._update_status()
 
     def _update_status(self):
         alive = "● LIVE" if self.reader.alive else "○ ENDED"
-        rate = self.n_total / max(1, self.buf[-1, 0] - self.buf[0, 0]) if self.n_total > WINDOW_N else 0
-        self.status.showMessage(
+        dt = self.buf[-1, 0] - self.buf[0, 0]
+        rate = self.n_total / dt if self.n_total > WINDOW_N and dt > 0 else 0
+        self.status.setText(
             f"  {alive}   |   Samples: {self.n_total:,}   |   "
             f"Effective rate: {rate:.0f} Hz   |   "
             f"Window: {WINDOW_SEC}s ({WINDOW_N} pts)"
         )
 
-    def resizeEvent(self, event):
-        """Re-capture blit backgrounds after a window resize."""
-        super().resizeEvent(event)
-        # Schedule background re-capture after Qt finishes the resize
-        QTimer.singleShot(50, self._full_redraw)
-
-    def _full_redraw(self):
-        self.canvas.draw()
-        self._save_backgrounds()
-
 
 # ── Entry point ──────────────────────────────────────────────────────────
 
 def main():
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
+    # Check whether there is already a running QApplication
+    qapp = QtWidgets.QApplication.instance()
+    if not qapp:
+        qapp = QtWidgets.QApplication(sys.argv)
 
     reader = ReaderThread()
     reader.start()
 
     win = Oscilloscope(reader)
     win.show()
+    win.activateWindow()
+    win.raise_()
 
     try:
-        sys.exit(app.exec_())
+        qapp.exec()
     except (KeyboardInterrupt, SystemExit):
         pass
 
