@@ -25,7 +25,7 @@ from matplotlib.figure import Figure
 SAMPLE_RATE = 440                          # Hz (from header)
 WINDOW_SEC = 3                             # seconds of visible history
 WINDOW_N = SAMPLE_RATE * WINDOW_SEC        # samples in rolling buffer
-FPS = 30                                   # display refresh rate
+FPS = 300                                   # display refresh rate
 NCHAN = 8
 
 COLORS = [
@@ -170,43 +170,36 @@ class Oscilloscope(QMainWindow):
 
         self._append(new)
 
-        # Check if any channel's range changed enough to need a full redraw
+        # Update line data
+        for i in range(NCHAN):
+            self.lines[i].set_ydata(self.buf[:, i + 1])
+
+        # Auto-scale: only widen limits when data exceeds them.
+        # This avoids triggering a full redraw every single frame.
         need_full_redraw = False
         for i in range(NCHAN):
             y = self.buf[:, i + 1]
             ymin, ymax = y.min(), y.max()
-            margin = max(abs(ymax - ymin) * 0.2, 5e-4)
-            new_lo, new_hi = ymin - margin, ymax + margin
             old_lo, old_hi = self.axes[i].get_ylim()
-            # Redraw if limits drifted noticeably
-            if abs(new_lo - old_lo) > margin * 0.3 or abs(new_hi - old_hi) > margin * 0.3:
-                self.axes[i].set_ylim(new_lo, new_hi)
+            if ymin < old_lo or ymax > old_hi:
+                span = max(ymax - ymin, 1e-3)
+                margin = span * 0.35
+                self.axes[i].set_ylim(ymin - margin, ymax + margin)
                 need_full_redraw = True
 
         if need_full_redraw:
-            # Axes decorations changed — full redraw, then re-save backgrounds
-            for i in range(NCHAN):
-                self.lines[i].set_ydata(self.buf[:, i + 1])
-            self.canvas.draw_idle()
-            # Re-save after the draw completes (via a single-shot callback)
-            self.canvas.mpl_connect("draw_event", self._on_draw_event)
+            # Axes ticks/labels changed — synchronous full redraw,
+            # then immediately re-capture backgrounds for future blits.
+            self.canvas.draw()
+            self._save_backgrounds()
         else:
-            # Fast path: blit only the line artists
+            # Fast path: blit only the line artists (no tick redraw)
             for i in range(NCHAN):
                 self.canvas.restore_region(self._bgs[i])
-                self.lines[i].set_ydata(self.buf[:, i + 1])
                 self.axes[i].draw_artist(self.lines[i])
                 self.canvas.blit(self.axes[i].bbox)
 
         self._update_status()
-
-    def _on_draw_event(self, _event):
-        """Re-capture backgrounds after a full redraw."""
-        self._save_backgrounds()
-        # Disconnect so we don't re-save on every future blit
-        self.canvas.mpl_disconnect(
-            self.canvas.callbacks.callbacks.get("draw_event", {})
-        )
 
     def _update_status(self):
         alive = "● LIVE" if self.reader.alive else "○ ENDED"
@@ -224,8 +217,8 @@ class Oscilloscope(QMainWindow):
         QTimer.singleShot(50, self._full_redraw)
 
     def _full_redraw(self):
-        self.canvas.draw_idle()
-        QTimer.singleShot(50, self._save_backgrounds)
+        self.canvas.draw()
+        self._save_backgrounds()
 
 
 # ── Entry point ──────────────────────────────────────────────────────────

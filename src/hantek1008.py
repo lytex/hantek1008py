@@ -460,7 +460,7 @@ class Hantek1008Raw:
             for row in list(zip(*per_channel_data.values())):
                 yield dict(zip(per_channel_data.keys(), row))
 
-    def request_samples_roll_mode(self, sampling_rate: int = 440) \
+    def request_samples_roll_mode(self, sampling_rate: int = 48_000) \
             -> Generator[Dict[int, List[int]], None, None]:
 
         assert sampling_rate in Hantek1008Raw.__roll_mode_sampling_rate_to_id_dic, \
