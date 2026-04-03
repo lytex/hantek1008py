@@ -45,5 +45,5 @@ circumstances, but I will try my best.
 
 ### wip interface
 ```bash
-python -u src/csvexport.py '-' -t first_column -s 1 2 3 4 5 6 7 8 | uv run src/oscilloscope.py
+python -u src/csvexport.py -f 440 '-' -t first_column -s 1 2 3 4 5 6 7 8 -b burst | python src/oscilloscope.py
 ```

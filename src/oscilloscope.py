@@ -36,8 +36,8 @@ from matplotlib.figure import Figure
 
 # ── Configuration ────────────────────────────────────────────────────────
 
-SAMPLE_RATE = 40_000                          # Hz (from header)
-WINDOW_SEC = 1/1000                             # seconds of visible history
+SAMPLE_RATE = 440                          # Hz (from header)
+WINDOW_SEC = 1                              # seconds of visible history
 WINDOW_N = int(SAMPLE_RATE * WINDOW_SEC)        # samples in rolling buffer
 DRAW_INTERVAL_MS = 20                      # ~50 fps drawing
 DATA_INTERVAL_MS = 1                       # drain stdin ASAP

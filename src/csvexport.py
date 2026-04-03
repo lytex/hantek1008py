@@ -328,11 +328,11 @@ def sample(device: Hantek1008,
             # TODO currently not supported
             # TODO missing features:
             # * timestamp_style
-            assert timestamp_style == TimestampStyle.OWN_ROW
             while True:
+                last_timestamp = datetime.datetime.now().timestamp()
                 per_channel_data = device.request_samples_burst_mode()
                 now_timestamp = datetime.datetime.now().timestamp()
-                write_per_channel_data(per_channel_data, None, now_timestamp)
+                write_per_channel_data(per_channel_data, last_timestamp, now_timestamp)
 
     except KeyboardInterrupt:
         log.info("Sample collection was stopped by user")
